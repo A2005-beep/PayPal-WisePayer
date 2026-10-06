@@ -1,0 +1,43 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Render Deployment Blueprint
+# Deploys both the FastAPI backend and React frontend as Render services.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  # ── Backend: FastAPI ───────────────────────────────────────────────────────
+  - type: web
+    name: wisepayer-api
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn api.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PAYPAL_CLIENT_ID
+        sync: false
+      - key: PAYPAL_CLIENT_SECRET
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: CHANNEL3_API_KEY
+        sync: false
+      - key: APP_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+    healthCheckPath: /health
+    plan: free
+
+  # ── Frontend: React + Vite ─────────────────────────────────────────────────
+  - type: web
+    name: wisepayer-ui
+    runtime: node
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    envVars:
+      - key: VITE_API_URL
+        fromService:
+          name: wisepayer-api
+          type: web
+          property: host
+    plan: free

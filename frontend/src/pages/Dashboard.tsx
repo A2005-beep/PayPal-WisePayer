@@ -5,7 +5,7 @@ import { GuardianCard } from '../components/GuardianCard'
 import { CashflowGrid } from '../components/CashflowGrid'
 import { WiseScoreCard } from '../components/WiseScoreCard'
 import { SubscriptionLeakDetector } from '../components/SubscriptionLeakDetector'
-import { wisepayerApi } from '../api/wisepayerApi'
+import { wisepayerApi, BASE_URL } from '../api/wisepayerApi'
 import type {
   AgentDecisionResponse,
   CashflowRow,
@@ -90,7 +90,7 @@ export const Dashboard: React.FC = () => {
         current_balance: DEMO_USER.balance,
         minimum_balance: DEMO_USER.minBalance,
         autonomy_level: autonomyLevel,
-        merchant_agent_url: enableA2A ? 'http://localhost:8000/a2a/merchant/negotiate' : undefined,
+        merchant_agent_url: enableA2A ? `${BASE_URL}/a2a/merchant/negotiate` : undefined,
       })
       setDecision(res.data)
     } catch (e: any) {

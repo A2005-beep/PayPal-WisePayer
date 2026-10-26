@@ -213,10 +213,24 @@ class BuyerAgent:
         earliest: Optional[date],
     ) -> str:
         snap = self.model.today_snapshot()
-        # Try LLM-generated explanation first
         if self._llm:
-            return self._llm_explanation(request, status, action, safe_today, earliest, snap)
-        # Rule-based fallback
+            try:
+                text = self._llm_explanation(request, status, action, safe_today, earliest, snap)
+                if text:
+                    return text
+            except Exception as e:
+                logger.warning("LLM explanation failed: %s. Falling back to rule-based engine.", e)
+        return self._rule_based_explanation(request, status, action, safe_today, earliest, snap)
+
+    def _rule_based_explanation(
+        self,
+        request: PurchaseRequest,
+        status: str,
+        action: str,
+        safe_today: float,
+        earliest: Optional[date],
+        snap: Any,
+    ) -> str:
         reserved = snap.reserved_essential
         balance = snap.projected_balance
         min_bal = self.model.minimum_balance
@@ -260,12 +274,8 @@ Available discretionary: ${safe_today:,.2f}
 Earliest safe date: {earliest}
 
 Output only the explanation text, no JSON or markdown."""
-        try:
-            response = self._llm.generate_content(prompt)
-            return response.text.strip()
-        except Exception as e:
-            logger.warning("LLM explanation failed: %s. Using fallback.", e)
-            return self._generate_explanation.__wrapped__(self, request, status, action, safe_today, earliest)
+        response = self._llm.generate_content(prompt)
+        return response.text.strip() if response and response.text else ""
 
     # ──────────────────────────────────────── A2A merchant negotiation ───────
     def _negotiate_with_merchant(

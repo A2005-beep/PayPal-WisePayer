@@ -30,14 +30,17 @@ services:
   # ── Frontend: React + Vite ─────────────────────────────────────────────────
   - type: web
     name: wisepayer-ui
-    runtime: node
+    runtime: static
     rootDir: frontend
     buildCommand: npm install && npm run build
-    staticPublishPath: dist
+    staticPublishPath: ./dist
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
     envVars:
       - key: VITE_API_URL
         fromService:
           name: wisepayer-api
           type: web
           property: host
-    plan: free

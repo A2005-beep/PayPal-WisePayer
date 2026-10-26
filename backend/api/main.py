@@ -122,6 +122,17 @@ class WebhookEvent(BaseModel):
 
 # ────────────────────────────────────────────────── routes ────────────────────
 
+@app.get("/")
+async def root():
+    return {
+        "service": "PayPal WisePayer API",
+        "status": "online",
+        "description": "Autonomous Cashflow Guardian & Agentic Commerce Engine",
+        "docs_url": "/docs",
+        "health_url": "/health",
+    }
+
+
 @app.get("/health")
 async def health():
     paypal_status = get_paypal().health_check()

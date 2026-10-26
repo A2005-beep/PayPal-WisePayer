@@ -20,15 +20,35 @@ import os
 from datetime import date, datetime
 from typing import Any, Optional
 
+try:
+    from dotenv import load_dotenv
+    # Load from cwd, or backend directory, or project root
+    load_dotenv()
+    _env_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".env"))
+    if os.path.exists(_env_root):
+        load_dotenv(_env_root)
+    _env_backend = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env"))
+    if os.path.exists(_env_backend):
+        load_dotenv(_env_backend)
+except ImportError:
+    pass
+
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from ..engine.cashflow_model import CashflowModel, FinancialEvent
-from ..engine.wise_score import compute_wise_score
-from ..paypal.sandbox_client import PayPalSandboxClient, PayPalAPIError
-from ..agent.buyer_agent import BuyerAgent, AutonomyLevel, PurchaseRequest
-from ..agent.merchant_agent import MerchantAgent, NegotiationRequest
+try:
+    from ..engine.cashflow_model import CashflowModel, FinancialEvent
+    from ..engine.wise_score import compute_wise_score
+    from ..paypal.sandbox_client import PayPalSandboxClient, PayPalAPIError
+    from ..agent.buyer_agent import BuyerAgent, AutonomyLevel, PurchaseRequest
+    from ..agent.merchant_agent import MerchantAgent, NegotiationRequest
+except (ImportError, ValueError):
+    from engine.cashflow_model import CashflowModel, FinancialEvent
+    from engine.wise_score import compute_wise_score
+    from paypal.sandbox_client import PayPalSandboxClient, PayPalAPIError
+    from agent.buyer_agent import BuyerAgent, AutonomyLevel, PurchaseRequest
+    from agent.merchant_agent import MerchantAgent, NegotiationRequest
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

@@ -16,8 +16,6 @@
     "axios": "^1.7.2",
     "ag-grid-react": "^31.3.2",
     "ag-grid-community": "^31.3.2",
-    "@bryntum/scheduler": "^6.0.0",
-    "@bryntum/scheduler-react": "^6.0.0",
     "recharts": "^2.12.7",
     "framer-motion": "^11.2.12",
     "lucide-react": "^0.395.0",

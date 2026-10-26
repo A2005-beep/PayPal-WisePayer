@@ -18,9 +18,14 @@ from datetime import date, datetime, timedelta
 from enum import IntEnum
 from typing import Any, Optional
 
-from ..engine.cashflow_model import CashflowModel
-from ..engine.wise_score import compute_wise_score
-from ..paypal.sandbox_client import PayPalSandboxClient
+try:
+    from ..engine.cashflow_model import CashflowModel
+    from ..engine.wise_score import compute_wise_score
+    from ..paypal.sandbox_client import PayPalSandboxClient
+except (ImportError, ValueError):
+    from engine.cashflow_model import CashflowModel
+    from engine.wise_score import compute_wise_score
+    from paypal.sandbox_client import PayPalSandboxClient
 
 logger = logging.getLogger(__name__)
 

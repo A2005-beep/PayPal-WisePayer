@@ -1,12 +1,9 @@
 import React, { useEffect, useState, useMemo } from 'react'
 import { AgGridReact } from 'ag-grid-react'
 import type { ColDef, ICellRendererParams } from 'ag-grid-community'
-import { ModuleRegistry, AllCommunityModule } from 'ag-grid-community'
 import 'ag-grid-community/styles/ag-grid.css'
 import 'ag-grid-community/styles/ag-theme-quartz.css'
 import type { CashflowRow } from '../api/wisepayerApi'
-
-ModuleRegistry.registerModules([AllCommunityModule])
 
 interface CashflowGridProps {
   rows: CashflowRow[]

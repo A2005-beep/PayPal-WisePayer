@@ -5,7 +5,7 @@ import type { SubscriptionLeak } from '../api/wisepayerApi'
 interface SubscriptionLeakDetectorProps {
   leaks: SubscriptionLeak[]
   totalAnnualWaste: number
-  onCancelSubscription: (eventId: string, description: string) => void
+  onCancelSubscription: (eventId: string, description: string) => Promise<void> | void
 }
 
 const CATEGORY_EMOJI: Record<string, string> = {
@@ -32,12 +32,20 @@ export const SubscriptionLeakDetector: React.FC<SubscriptionLeakDetectorProps> =
   const [cancelling, setCancelling] = useState<string | null>(null)
   const [cancelled, setCancelled] = useState<Set<string>>(new Set())
 
+  const [cancelFeedback, setCancelFeedback] = useState<string | null>(null)
+
   const handleCancel = async (leak: SubscriptionLeak) => {
     setCancelling(leak.event_id)
-    await new Promise(r => setTimeout(r, 800)) // Simulate API call
-    onCancelSubscription(leak.event_id, leak.description)
-    setCancelled(prev => new Set(prev).add(leak.event_id))
-    setCancelling(null)
+    try {
+      await onCancelSubscription(leak.event_id, leak.description)
+      setCancelled(prev => new Set(prev).add(leak.event_id))
+      setCancelFeedback(`✅ ${leak.description} cancelled. Cashflow projections updated.`)
+      setTimeout(() => setCancelFeedback(null), 4000)
+    } catch (err: any) {
+      setCancelFeedback(`⚠️ Cancellation error: ${err?.message || 'Could not cancel'}`)
+    } finally {
+      setCancelling(null)
+    }
   }
 
   const activeleaks = leaks.filter(l => !cancelled.has(l.event_id))
@@ -71,6 +79,16 @@ export const SubscriptionLeakDetector: React.FC<SubscriptionLeakDetectorProps> =
           </div>
           <span className="text-red-300 text-2xl font-black">${totalAnnualWaste.toFixed(0)}</span>
         </div>
+      )}
+
+      {cancelFeedback && (
+        <motion.div
+          initial={{ opacity: 0, y: -6 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="bg-emerald-900/30 border border-emerald-600 text-emerald-200 px-4 py-2.5 rounded-xl text-xs font-semibold"
+        >
+          {cancelFeedback}
+        </motion.div>
       )}
 
       {/* Leak cards */}

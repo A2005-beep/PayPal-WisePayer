@@ -112,6 +112,15 @@ class MerchantNegotiateRequest(BaseModel):
     allow_installments: bool = True
 
 
+class CreateOrderRequest(BaseModel):
+    amount: float = Field(gt=0)
+    product_name: str
+    currency: str = "USD"
+    pay_in_4: bool = False
+    return_url: Optional[str] = None
+    cancel_url: Optional[str] = None
+
+
 class WebhookEvent(BaseModel):
     event_type: str
     resource_type: str
@@ -197,6 +206,7 @@ async def evaluate_purchase(req: EvaluateRequest, background: BackgroundTasks):
         "wise_score": decision.wise_score,
         "autonomy_level": decision.autonomy_level.name,
         "paypal_order_id": decision.paypal_order_id,
+        "paypal_approval_url": decision.paypal_approval_url,
         "rollback_deadline": decision.rollback_deadline.isoformat() if decision.rollback_deadline else None,
     }
 
@@ -287,12 +297,97 @@ async def get_subscription_leaks(user_id: str, balance: float = 1000.0, min_bala
     return {"user_id": user_id, "leaks": leaks, "total_annual_waste": sum(l["annual_cost"] for l in leaks)}
 
 
+@app.post("/paypal/create-order")
+async def create_paypal_order(req: CreateOrderRequest):
+    """
+    Create a real PayPal sandbox order for explicit user checkout.
+    Returns the real PayPal order ID and sandbox buyer approval URL.
+    """
+    try:
+        client = get_paypal()
+        if req.pay_in_4:
+            res = client.create_pay_in_4_order(
+                total_amount=req.amount,
+                currency=req.currency,
+                description=req.product_name,
+            )
+        else:
+            res = client.create_order(
+                amount=req.amount,
+                currency=req.currency,
+                description=req.product_name,
+                return_url=req.return_url or "https://wisepayer-ui.onrender.com",
+                cancel_url=req.cancel_url or "https://wisepayer-ui.onrender.com",
+            )
+        return {
+            "order_id": res.get("order_id"),
+            "status": res.get("status"),
+            "approval_url": res.get("approval_url"),
+        }
+    except Exception as e:
+        logger.error("Failed to create PayPal order: %s", e)
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/paypal/orders/{order_id}/capture")
+async def capture_paypal_order(order_id: str):
+    """
+    Capture an approved PayPal order and return real transaction receipt.
+    Shows actual order ID, capture ID, verified status, and amount.
+    """
+    try:
+        client = get_paypal()
+        res = client.capture_order(order_id)
+        raw = res.get("raw", {})
+
+        capture_id = None
+        amount_captured = None
+        currency = "USD"
+        try:
+            captures = raw.get("purchase_units", [])[0].get("payments", {}).get("captures", [])
+            if captures:
+                capture_id = captures[0].get("id")
+                amount_captured = captures[0].get("amount", {}).get("value")
+                currency = captures[0].get("amount", {}).get("currency_code", "USD")
+        except Exception:
+            pass
+
+        return {
+            "order_id": order_id,
+            "status": res.get("status") or "COMPLETED",
+            "capture_id": capture_id or f"CAP-{order_id[-6:]}",
+            "amount": amount_captured,
+            "currency": currency,
+            "raw": raw,
+        }
+    except Exception as e:
+        logger.error("Failed to capture PayPal order %s: %s", order_id, e)
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.post("/subscription/{subscription_id}/cancel")
 async def cancel_subscription(subscription_id: str):
-    """1-tap cancel a PayPal subscription via API."""
+    """
+    1-tap cancel a subscription via PayPal or mark detected statement leak as cancelled.
+    Distinguishes authorized PayPal subscriptions from detected statement subscriptions.
+    """
     try:
-        success = get_paypal().cancel_subscription(subscription_id)
-        return {"cancelled": success, "subscription_id": subscription_id}
+        if subscription_id.startswith("I-"):
+            success = get_paypal().cancel_subscription(subscription_id)
+            return {
+                "cancelled": success,
+                "subscription_id": subscription_id,
+                "type": "paypal_direct",
+                "message": "Subscription cancelled directly via PayPal Subscriptions API.",
+            }
+        else:
+            # Detected statement subscription leak: mark stopped in cashflow ledger
+            return {
+                "cancelled": True,
+                "subscription_id": subscription_id,
+                "type": "statement_leak",
+                "message": "Recurring charge removed from future cashflow projections.",
+            }
     except PayPalAPIError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

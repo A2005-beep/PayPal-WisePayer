@@ -34,6 +34,7 @@ export interface AgentDecisionResponse {
   wise_score: number
   autonomy_level: 'ADVISE' | 'BOUNDED' | 'GUARDIAN'
   paypal_order_id: string | null
+  paypal_approval_url?: string | null
   rollback_deadline: string | null
 }
 
@@ -84,11 +85,41 @@ export interface SmartWaitHold {
   status: string
 }
 
+export interface CreateOrderPayload {
+  amount: number
+  product_name: string
+  currency?: string
+  pay_in_4?: boolean
+  return_url?: string
+  cancel_url?: string
+}
+
+export interface CreateOrderResponse {
+  order_id: string
+  status: string
+  approval_url: string | null
+}
+
+export interface CaptureOrderResponse {
+  order_id: string
+  status: string
+  capture_id: string
+  amount?: string
+  currency?: string
+  raw?: any
+}
+
 export const wisepayerApi = {
   health: () => api.get('/health'),
 
   evaluate: (payload: EvaluatePayload) =>
     api.post<AgentDecisionResponse>('/evaluate', payload),
+
+  createOrder: (payload: CreateOrderPayload) =>
+    api.post<CreateOrderResponse>('/paypal/create-order', payload),
+
+  captureOrder: (orderId: string) =>
+    api.post<CaptureOrderResponse>(`/paypal/orders/${orderId}/capture`),
 
   merchantNegotiate: (payload: object) =>
     api.post('/a2a/merchant/negotiate', payload),

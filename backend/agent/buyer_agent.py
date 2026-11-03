@@ -66,6 +66,7 @@ class AgentDecision:
     wise_score: int
     autonomy_level: AutonomyLevel
     paypal_order_id: Optional[str] = None
+    paypal_approval_url: Optional[str] = None
     rollback_deadline: Optional[datetime] = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -149,9 +150,10 @@ class BuyerAgent:
 
         # ── Step 5: Execute (if autonomy permits)
         order_id = None
+        approval_url = None
         rollback_deadline = None
         if self._should_auto_execute(action, final_amount):
-            order_id, rollback_deadline = self._execute_payment(action, final_amount, request)
+            order_id, approval_url, rollback_deadline = self._execute_payment(action, final_amount, request)
 
         return AgentDecision(
             affordability_status=status,
@@ -164,6 +166,7 @@ class BuyerAgent:
             wise_score=wise.score,
             autonomy_level=self.autonomy,
             paypal_order_id=order_id,
+            paypal_approval_url=approval_url,
             rollback_deadline=rollback_deadline,
         )
 
@@ -282,9 +285,8 @@ Output only the explanation text, no JSON or markdown."""
         self, request: PurchaseRequest, safe_budget: float
     ) -> Optional[float]:
         """
-        Simulate A2A negotiation with merchant agent.
-        In production: POST to request.merchant_agent_url.
-        Here: mock protocol for demo purposes.
+        A2A negotiation with merchant agent.
+        Uses MerchantAgent protocol to request a budget-aligned discount.
         """
         if not request.merchant_agent_url:
             return None
@@ -293,24 +295,39 @@ Output only the explanation text, no JSON or markdown."""
         if shortfall <= 0:
             return request.amount
 
-        # Buyer agent proposes: "can you match my budget?"
-        buyer_offer = safe_budget
+        # Buyer agent proposes budget match discount
         discount_pct = (shortfall / request.amount) * 100
-
         logger.info(
             "[A2A] Buyer Agent → Merchant: Offering $%.2f (%.1f%% discount requested)",
-            buyer_offer,
+            safe_budget,
             discount_pct,
         )
 
-        # Merchant agent logic (mock): Accept up to 8% discount
-        if discount_pct <= 8.0:
-            agreed_price = round(request.amount * (1 - discount_pct / 100), 2)
-            logger.info("[A2A] Merchant Agent → Buyer: Accepted. Price: $%.2f", agreed_price)
-            return agreed_price
-        else:
-            # Counter-offer: merchant splits to installments instead
-            logger.info("[A2A] Merchant Agent → Buyer: Discount too high. Offering installment plan.")
+        try:
+            try:
+                from ..agent.merchant_agent import MerchantAgent, NegotiationRequest
+            except (ImportError, ValueError):
+                from agent.merchant_agent import MerchantAgent, NegotiationRequest
+
+            merchant = MerchantAgent(merchant_name="Verified Partner Merchant", max_discount_pct=10.0)
+            negotiation = merchant.negotiate(NegotiationRequest(
+                buyer_agent_id="buyer-agent-001",
+                product_name=request.product_name,
+                list_price=request.amount,
+                currency=request.currency,
+                buyer_budget=safe_budget,
+                proposed_discount_pct=discount_pct,
+                allow_installments=True,
+            ))
+
+            if negotiation.accepted and negotiation.final_price <= safe_budget:
+                logger.info("[A2A] Merchant Agent accepted! Final negotiated price: $%.2f", negotiation.final_price)
+                return negotiation.final_price
+            else:
+                logger.info("[A2A] Merchant Agent declined or countered with installments: %s", negotiation.merchant_message)
+                return None
+        except Exception as exc:
+            logger.warning("[A2A] Negotiation error: %s", exc)
             return None
 
     # ──────────────────────────────────────────────── auto-execution ─────────
@@ -325,7 +342,7 @@ Output only the explanation text, no JSON or markdown."""
 
     def _execute_payment(
         self, action: str, amount: float, request: PurchaseRequest
-    ) -> tuple[Optional[str], Optional[datetime]]:
+    ) -> tuple[Optional[str], Optional[str], Optional[datetime]]:
         try:
             if action == "pay_in_4":
                 result = self.paypal.create_pay_in_4_order(
@@ -340,9 +357,10 @@ Output only the explanation text, no JSON or markdown."""
                     description=request.product_name,
                 )
             order_id = result.get("order_id")
+            approval_url = result.get("approval_url")
             rollback = datetime.now() + timedelta(minutes=30)
             logger.info("Auto-executed order %s. Rollback window until %s", order_id, rollback)
-            return order_id, rollback
+            return order_id, approval_url, rollback
         except Exception as exc:
             logger.error("Auto-execution failed: %s", exc)
-            return None, None
+            return None, None, None

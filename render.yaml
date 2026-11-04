@@ -40,7 +40,4 @@ services:
         destination: /index.html
     envVars:
       - key: VITE_API_URL
-        fromService:
-          name: wisepayer-api
-          type: web
-          property: host
+        value: https://wisepayer-api.onrender.com

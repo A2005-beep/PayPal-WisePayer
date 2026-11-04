@@ -1,7 +1,27 @@
 import axios from 'axios'
 
-const RAW_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
-export const BASE_URL = RAW_URL.startsWith('http') ? RAW_URL : `https://${RAW_URL}`
+function resolveApiUrl(): string {
+  const envUrl = import.meta.env.VITE_API_URL
+  if (envUrl && envUrl.trim() !== '') {
+    if (envUrl.startsWith('http://') || envUrl.startsWith('https://')) {
+      return envUrl
+    }
+    // If Render passes internal service name like 'wisepayer-api'
+    if (envUrl === 'wisepayer-api' || !envUrl.includes('.')) {
+      return `https://${envUrl}.onrender.com`
+    }
+    return `https://${envUrl}`
+  }
+
+  // If in browser and running on Render domain (*.onrender.com)
+  if (typeof window !== 'undefined' && window.location.hostname.endsWith('onrender.com')) {
+    return 'https://wisepayer-api.onrender.com'
+  }
+
+  return 'http://localhost:8000'
+}
+
+export const BASE_URL = resolveApiUrl()
 
 const api = axios.create({
   baseURL: BASE_URL,

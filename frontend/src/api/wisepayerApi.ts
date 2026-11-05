@@ -43,6 +43,49 @@ export interface EvaluatePayload {
   events?: object[]
 }
 
+export interface CounterfactualOption {
+  option: string
+  upfront: number
+  lowest_projected_balance: number
+  is_safe: boolean
+  status: string
+  risk_assessment: string
+}
+
+export interface NegotiationDetails {
+  attempted: boolean
+  accepted: boolean
+  counter_type: string
+  merchant_name: string
+  buyer_budget_constraint: number
+  list_price: number
+  discount_requested_pct: number
+  final_price: number | null
+  installment_plan: Array<{ date: string; amount: number }> | null
+  merchant_message: string
+  ai_agent_rationale: string
+}
+
+export interface UserProfileResponse {
+  user_id: string
+  current_balance: number
+  minimum_balance: number
+  bounded_limit: number
+  daily_spending_limit: number
+  spent_today: number
+  safe_discretionary_today: number
+  reserved_essential: number
+  wise_score: number
+  wise_grade: string
+  events_count: number
+}
+
+export interface UpdatePolicyPayload {
+  minimum_balance?: number
+  bounded_limit?: number
+  daily_spending_limit?: number
+}
+
 export interface AgentDecisionResponse {
   affordability_status: 'affordable_now' | 'affordable_with_plan' | 'affordable_later' | 'not_affordable'
   recommended_action: 'full_payment' | 'pay_in_4' | 'smart_wait' | 'not_recommended'
@@ -56,6 +99,15 @@ export interface AgentDecisionResponse {
   paypal_order_id: string | null
   paypal_approval_url?: string | null
   rollback_deadline: string | null
+  counterfactuals?: CounterfactualOption[]
+  negotiation_details?: NegotiationDetails | null
+  policy_checks?: {
+    daily_limit_exceeded: boolean
+    daily_spending_limit: number
+    spent_today: number
+    bounded_limit: number
+    minimum_balance: number
+  }
 }
 
 export interface CashflowRow {
@@ -164,7 +216,22 @@ export const wisepayerApi = {
   cancelSubscription: (subscriptionId: string) =>
     api.post(`/subscription/${subscriptionId}/cancel`),
 
+  getUserProfile: (userId: string) =>
+    api.get<UserProfileResponse>(`/user/${userId}/profile`),
+
+  updateUserPolicy: (userId: string, payload: UpdatePolicyPayload) =>
+    api.post(`/user/${userId}/policy`, payload),
+
+  resetUserProfile: (userId: string) =>
+    api.post(`/user/${userId}/reset`),
+
   getSmartWaitHolds: () => api.get<{ holds: SmartWaitHold[] }>('/smart-wait-holds'),
+
+  pauseSmartWaitHold: (holdId: string) =>
+    api.post(`/smart-wait-holds/${holdId}/pause`),
+
+  resumeSmartWaitHold: (holdId: string) =>
+    api.post(`/smart-wait-holds/${holdId}/resume`),
 
   cancelSmartWaitHold: (holdId: string) =>
     api.delete(`/smart-wait-holds/${holdId}/cancel`),

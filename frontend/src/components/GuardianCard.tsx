@@ -1,6 +1,17 @@
 import React, { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { ShieldCheck, AlertTriangle, XCircle, Clock, Zap, ChevronDown, ChevronUp } from 'lucide-react'
+import {
+  ShieldCheck,
+  AlertTriangle,
+  XCircle,
+  Clock,
+  Zap,
+  ChevronDown,
+  ChevronUp,
+  Scale,
+  BrainCircuit,
+  MessageSquare,
+} from 'lucide-react'
 import type { AgentDecisionResponse } from '../api/wisepayerApi'
 
 interface GuardianCardProps {
@@ -11,6 +22,7 @@ interface GuardianCardProps {
   onConfirmPayment: () => void
   onReject: () => void
   isLoading: boolean
+  isStale?: boolean
 }
 
 const STATUS_CONFIG = {
@@ -59,8 +71,10 @@ export const GuardianCard: React.FC<GuardianCardProps> = ({
   onConfirmPayment,
   onReject,
   isLoading,
+  isStale = false,
 }) => {
   const [showDetails, setShowDetails] = useState(false)
+  const [showNegotiation, setShowNegotiation] = useState(true)
 
   if (isLoading) {
     return (
@@ -80,7 +94,7 @@ export const GuardianCard: React.FC<GuardianCardProps> = ({
   const config = STATUS_CONFIG[decision.affordability_status]
   const StatusIcon = config.icon
   const reservedAmount = currentBalance - decision.safe_to_pay_today
-  const canExecute = decision.recommended_action !== 'not_recommended'
+  const canExecute = decision.recommended_action !== 'not_recommended' && !isStale
 
   return (
     <AnimatePresence>
@@ -91,6 +105,29 @@ export const GuardianCard: React.FC<GuardianCardProps> = ({
         transition={{ duration: 0.35, ease: 'easeOut' }}
         className={`rounded-2xl border p-6 flex flex-col gap-5 shadow-2xl ${config.bg}`}
       >
+        {/* ── Stale Input Alert ── */}
+        {isStale && (
+          <div className="bg-amber-950/80 border border-amber-500 text-amber-200 px-4 py-2.5 rounded-xl text-xs flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400" />
+            <span>
+              <strong>Inputs modified:</strong> Click <strong className="underline">Ask WisePayer Guardian</strong> to re-evaluate with current parameters before checkout.
+            </span>
+          </div>
+        )}
+
+        {/* ── Daily Limit Exceeded Alert ── */}
+        {decision.policy_checks?.daily_limit_exceeded && (
+          <div className="bg-red-950/80 border border-red-600 text-red-200 px-4 py-2.5 rounded-xl text-xs flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0 text-red-400" />
+            <span>
+              <strong>Daily spending limit breached:</strong> Today's spend ($
+              {decision.policy_checks.spent_today.toFixed(2)}) + this purchase ($
+              {requestedAmount.toFixed(2)}) exceeds your daily limit of $
+              {decision.policy_checks.daily_spending_limit.toFixed(2)}.
+            </span>
+          </div>
+        )}
+
         {/* ── Header ── */}
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -134,30 +171,99 @@ export const GuardianCard: React.FC<GuardianCardProps> = ({
             />
           </div>
           <div className="flex justify-between text-xs">
-            <span className="text-red-400">🔒 Reserved: ${reservedAmount.toFixed(2)}</span>
-            <span className="text-emerald-400">💚 Safe: ${decision.safe_to_pay_today.toFixed(2)}</span>
+            <span className="text-red-400">🔒 Reserved for Bills: ${reservedAmount.toFixed(2)}</span>
+            <span className="text-emerald-400">💚 Safe Discretionary: ${decision.safe_to_pay_today.toFixed(2)}</span>
           </div>
         </div>
 
         {/* ── Explain My No ── */}
-        <div className="bg-slate-900/60 rounded-xl p-4 text-sm text-slate-200 leading-relaxed border border-slate-700">
-          {decision.explain_my_no}
+        <div className="bg-slate-900/60 rounded-xl p-4 text-sm text-slate-200 leading-relaxed border border-slate-700 flex items-start gap-3">
+          <BrainCircuit className="w-5 h-5 text-blue-400 shrink-0 mt-0.5" />
+          <div>
+            <p className="text-[11px] font-semibold text-blue-300 uppercase tracking-wide mb-1">
+              AI Decision Rationale
+            </p>
+            <p>{decision.explain_my_no}</p>
+          </div>
         </div>
 
-        {/* ── Negotiation Banner ── */}
-        {decision.negotiated_amount && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            className="bg-purple-900/40 border border-purple-600 rounded-xl p-3 text-sm text-purple-200 flex items-center gap-2"
-          >
-            <Zap className="w-4 h-4 text-purple-400 shrink-0" />
-            <span>
-              🤝 <strong>A2A Negotiation</strong>: Merchant agent agreed on{' '}
-              <strong>${decision.negotiated_amount.toFixed(2)}</strong>{' '}
-              (saved ${(requestedAmount - decision.negotiated_amount).toFixed(2)})
-            </span>
-          </motion.div>
+        {/* ── Counterfactual Comparison Panel ── */}
+        {decision.counterfactuals && decision.counterfactuals.length > 0 && (
+          <div className="bg-slate-900/40 border border-slate-800 rounded-xl p-3.5 flex flex-col gap-2.5">
+            <div className="flex items-center gap-1.5 text-xs text-slate-300 font-semibold">
+              <Scale className="w-3.5 h-3.5 text-blue-400" />
+              <span>Counterfactual Purchase Options (Lowest Balance Impact)</span>
+            </div>
+            <div className="grid grid-cols-3 gap-2 text-[11px]">
+              {decision.counterfactuals.map((cf, i) => (
+                <div
+                  key={i}
+                  className={`p-2 rounded-lg border flex flex-col justify-between gap-1.5 ${
+                    cf.is_safe
+                      ? 'bg-emerald-950/30 border-emerald-800/60 text-emerald-200'
+                      : 'bg-red-950/30 border-red-800/60 text-red-200'
+                  }`}
+                >
+                  <div>
+                    <span className="font-bold text-white block truncate">{cf.option}</span>
+                    <span className="text-[10px] opacity-75">${cf.upfront.toFixed(2)} upfront</span>
+                  </div>
+                  <div>
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold inline-block ${
+                      cf.is_safe ? 'bg-emerald-800/70 text-emerald-100' : 'bg-red-800/70 text-red-100'
+                    }`}>
+                      {cf.status}
+                    </span>
+                    <p className="text-[9px] opacity-70 mt-1 truncate" title={cf.risk_assessment}>
+                      {cf.risk_assessment}
+                    </p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* ── A2A Negotiation Protocol Details ── */}
+        {decision.negotiation_details && (
+          <div className="bg-purple-950/40 border border-purple-800/60 rounded-xl p-3.5 flex flex-col gap-2">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Zap className="w-4 h-4 text-purple-400" />
+                <span className="text-xs text-purple-200 font-semibold">A2A Negotiation Transcript</span>
+              </div>
+              <button
+                onClick={() => setShowNegotiation(!showNegotiation)}
+                className="text-[11px] text-purple-300 hover:text-white"
+              >
+                {showNegotiation ? 'Hide' : 'Details'}
+              </button>
+            </div>
+
+            {showNegotiation && (
+              <div className="text-xs text-purple-200/90 flex flex-col gap-1.5 pt-1 border-t border-purple-900/60">
+                <div className="flex justify-between">
+                  <span className="text-purple-400">Buyer Agent Constraint:</span>
+                  <span className="font-semibold text-white">
+                    Max Safe Budget: ${decision.negotiation_details.buyer_budget_constraint.toFixed(2)}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-purple-400">Discount Requested:</span>
+                  <span>{decision.negotiation_details.discount_requested_pct}% off list price</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-purple-400">Merchant Decision:</span>
+                  <span className="font-mono bg-purple-900/80 px-1.5 py-0.5 rounded text-[11px] text-purple-100 font-bold">
+                    {decision.negotiation_details.counter_type}
+                  </span>
+                </div>
+                <p className="text-[11px] bg-purple-900/30 p-2 rounded border border-purple-800/40 mt-1 italic">
+                  "{decision.negotiation_details.merchant_message}"
+                </p>
+              </div>
+            )}
+          </div>
         )}
 
         {/* ── Payment Plan (collapsible) ── */}
@@ -165,10 +271,10 @@ export const GuardianCard: React.FC<GuardianCardProps> = ({
           <div>
             <button
               onClick={() => setShowDetails(!showDetails)}
-              className="flex items-center gap-2 text-sm text-slate-300 hover:text-white transition-colors"
+              className="flex items-center gap-2 text-xs text-slate-300 hover:text-white transition-colors"
             >
-              {showDetails ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-              {showDetails ? 'Hide' : 'Show'} Payment Schedule
+              {showDetails ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+              {showDetails ? 'Hide' : 'Show'} Payment Schedule ({decision.payment_plan.length} parts)
             </button>
             <AnimatePresence>
               {showDetails && (
@@ -180,11 +286,11 @@ export const GuardianCard: React.FC<GuardianCardProps> = ({
                 >
                   <div className="flex flex-col gap-2">
                     {decision.payment_plan.map((p, i) => (
-                      <div key={i} className="flex justify-between items-center bg-slate-800 rounded-lg px-4 py-2 text-sm">
+                      <div key={i} className="flex justify-between items-center bg-slate-800 rounded-lg px-4 py-2 text-xs">
                         <span className="text-slate-400">{p.date}</span>
                         <span className="font-semibold text-white">${p.amount.toFixed(2)}</span>
                         {i === 0 && decision.recommended_action === 'pay_in_4' && (
-                          <span className="text-xs bg-blue-600 text-white px-2 py-0.5 rounded-full">Today</span>
+                          <span className="text-[10px] bg-blue-600 text-white px-2 py-0.5 rounded-full">Today</span>
                         )}
                       </div>
                     ))}
@@ -197,11 +303,11 @@ export const GuardianCard: React.FC<GuardianCardProps> = ({
 
         {/* ── Smart Wait Earliest Date ── */}
         {decision.earliest_safe_date && decision.recommended_action === 'smart_wait' && (
-          <div className="flex items-center gap-2 text-sm text-blue-300 bg-blue-900/30 rounded-lg px-4 py-2 border border-blue-700">
+          <div className="flex items-center gap-2 text-xs text-blue-300 bg-blue-900/30 rounded-lg px-4 py-2.5 border border-blue-700">
             <Clock className="w-4 h-4 shrink-0" />
             <span>
               WisePayer will auto-execute on{' '}
-              <strong>{decision.earliest_safe_date}</strong> when cashflow is safe.
+              <strong>{decision.earliest_safe_date}</strong> when payroll salary arrives.
             </span>
           </div>
         )}
@@ -241,7 +347,7 @@ export const GuardianCard: React.FC<GuardianCardProps> = ({
                 : 'bg-slate-700 text-slate-500 cursor-not-allowed'
             }`}
           >
-            {ACTION_LABELS[decision.recommended_action]}
+            {isStale ? 'Re-Evaluation Required' : ACTION_LABELS[decision.recommended_action]}
           </button>
         </div>
       </motion.div>

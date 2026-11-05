@@ -15,6 +15,8 @@ import {
   Play,
   Pause,
   Trash2,
+  RotateCcw,
+  ArrowRight,
 } from 'lucide-react'
 import { GuardianCard } from '../components/GuardianCard'
 import { CashflowGrid } from '../components/CashflowGrid'
@@ -31,8 +33,8 @@ import type {
 
 const TABS = [
   { id: 'checkout', label: 'Guardian Checkout', icon: ShoppingCart },
-  { id: 'cashflow', label: 'Cashflow', icon: BarChart3 },
-  { id: 'subscriptions', label: 'Subscriptions', icon: Repeat },
+  { id: 'cashflow', label: 'Cashflow Ledger', icon: BarChart3 },
+  { id: 'subscriptions', label: 'Recurring Leaks', icon: Repeat },
   { id: 'holds', label: 'Smart Holds', icon: Calendar },
 ] as const
 
@@ -65,22 +67,31 @@ const PRESET_SCENARIOS = [
   },
 ]
 
-const DEMO_USER = { id: 'demo-user-001', balance: 1420, minBalance: 200 }
+const DEMO_USER = { id: 'demo-user-001' }
 
 export const Dashboard: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabId>('checkout')
 
+  // Authoritative server-synced profile
+  const [userBalance, setUserBalance] = useState(1420)
+  const [minBalanceBuffer, setMinBalanceBuffer] = useState(200)
+  const [boundedLimit, setBoundedLimit] = useState(50)
+  const [dailySpendingLimit, setDailySpendingLimit] = useState(150)
+  const [spentToday, setSpentToday] = useState(0)
+
   // Checkout form state
-  const [productName, setProductName] = useState('Sony WH-1000XM5 Headphones')
-  const [amount, setAmount] = useState(350)
+  const [productName, setProductName] = useState('Espresso Coffee Maker')
+  const [amount, setAmount] = useState(28)
   const [autonomyLevel, setAutonomyLevel] = useState<0 | 1 | 2>(0)
   const [enableA2A, setEnableA2A] = useState(false)
 
-  // Policy & Guardrails
-  const [boundedLimit, setBoundedLimit] = useState(50)
-  const [dailySpendingLimit, setDailySpendingLimit] = useState(150)
-  const [minBalanceBuffer, setMinBalanceBuffer] = useState(200)
+  // Stale input detection
+  const [evaluatedProduct, setEvaluatedProduct] = useState('')
+  const [evaluatedAmount, setEvaluatedAmount] = useState(0)
+
+  // Policy & Guardrails modal
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
+  const [isSavingSettings, setIsSavingSettings] = useState(false)
 
   // Decision state
   const [decision, setDecision] = useState<AgentDecisionResponse | null>(null)
@@ -103,6 +114,7 @@ export const Dashboard: React.FC = () => {
     status: string
     amount?: string
     currency?: string
+    updated_balance?: number
   } | null>(null)
   const [checkoutError, setCheckoutError] = useState<string | null>(null)
 
@@ -112,8 +124,11 @@ export const Dashboard: React.FC = () => {
   const [leaks, setLeaks] = useState<SubscriptionLeak[]>([])
   const [totalWaste, setTotalWaste] = useState(0)
   const [holds, setHolds] = useState<SmartWaitHold[]>([])
-  const [pausedHolds, setPausedHolds] = useState<Set<string>>(new Set())
   const [isLoadingData, setIsLoadingData] = useState(false)
+
+  const isDecisionStale = Boolean(
+    decision && (productName !== evaluatedProduct || amount !== evaluatedAmount)
+  )
 
   useEffect(() => {
     loadDashboardData()
@@ -122,12 +137,23 @@ export const Dashboard: React.FC = () => {
   const loadDashboardData = async () => {
     setIsLoadingData(true)
     try {
+      // 1. Fetch authoritative profile
+      const profileRes = await wisepayerApi.getUserProfile(DEMO_USER.id)
+      const prof = profileRes.data
+      setUserBalance(prof.current_balance)
+      setMinBalanceBuffer(prof.minimum_balance)
+      setBoundedLimit(prof.bounded_limit)
+      setDailySpendingLimit(prof.daily_spending_limit)
+      setSpentToday(prof.spent_today)
+
+      // 2. Fetch cashflow, score, leaks, holds with identical authoritative parameters
       const [cashflowRes, scoreRes, leaksRes, holdsRes] = await Promise.all([
-        wisepayerApi.getCashflow(DEMO_USER.id, DEMO_USER.balance, minBalanceBuffer),
-        wisepayerApi.getWiseScore(DEMO_USER.id, DEMO_USER.balance, minBalanceBuffer),
-        wisepayerApi.getSubscriptionLeaks(DEMO_USER.id, DEMO_USER.balance, minBalanceBuffer),
+        wisepayerApi.getCashflow(DEMO_USER.id, prof.current_balance, prof.minimum_balance),
+        wisepayerApi.getWiseScore(DEMO_USER.id, prof.current_balance, prof.minimum_balance),
+        wisepayerApi.getSubscriptionLeaks(DEMO_USER.id, prof.current_balance, prof.minimum_balance),
         wisepayerApi.getSmartWaitHolds(),
       ])
+
       setCashflowRows(cashflowRes.data.cashflow_rows)
       setWiseScore(scoreRes.data)
       setLeaks(leaksRes.data.leaks)
@@ -150,13 +176,15 @@ export const Dashboard: React.FC = () => {
         product_name: prod,
         amount: amt,
         currency: 'USD',
-        current_balance: DEMO_USER.balance,
+        current_balance: userBalance,
         minimum_balance: minBalanceBuffer,
         autonomy_level: autonomyLevel,
         bounded_limit: boundedLimit,
         merchant_agent_url: enableA2A ? `${BASE_URL}/a2a/merchant/negotiate` : undefined,
       })
       setDecision(res.data)
+      setEvaluatedProduct(prod)
+      setEvaluatedAmount(amt)
     } catch (e: any) {
       setEvalError(e?.response?.data?.detail || 'Evaluation failed. Check backend connection.')
     } finally {
@@ -170,8 +198,40 @@ export const Dashboard: React.FC = () => {
     handleEvaluate(scenario.product, scenario.amount)
   }
 
+  const handleSavePolicy = async () => {
+    setIsSavingSettings(true)
+    try {
+      await wisepayerApi.updateUserPolicy(DEMO_USER.id, {
+        minimum_balance: minBalanceBuffer,
+        bounded_limit: boundedLimit,
+        daily_spending_limit: dailySpendingLimit,
+      })
+      setIsSettingsOpen(false)
+      await loadDashboardData()
+      if (decision) {
+        handleEvaluate()
+      }
+    } catch (e) {
+      console.error('Failed to save policy', e)
+    } finally {
+      setIsSavingSettings(false)
+    }
+  }
+
+  const handleResetDemo = async () => {
+    try {
+      await wisepayerApi.resetUserProfile(DEMO_USER.id)
+      setIsSettingsOpen(false)
+      setDecision(null)
+      await loadDashboardData()
+    } catch (e) {
+      console.error('Failed to reset demo profile', e)
+    }
+  }
+
   // Real PayPal Checkout Flow Handler
   const handleInitiatePayment = async () => {
+    if (isDecisionStale) return
     setCheckoutModalOpen(true)
     setCapturedReceipt(null)
     setCheckoutError(null)
@@ -223,30 +283,34 @@ export const Dashboard: React.FC = () => {
         status: res.data.status,
         amount: res.data.amount || String(activeOrder.amount),
         currency: res.data.currency || 'USD',
+        updated_balance: (res.data as any).updated_balance,
       })
-      // Adjust balance in UI
-      DEMO_USER.balance = Math.max(0, DEMO_USER.balance - activeOrder.amount)
+      // Re-synchronize authoritative dashboard ledger & cashflow
+      await loadDashboardData()
     } catch (err: any) {
-      setCheckoutError(err?.response?.data?.detail || 'Capture failed. Order may need approval in sandbox window.')
+      setCheckoutError(err?.response?.data?.detail || 'Capture failed. Order may require buyer approval in sandbox window.')
     } finally {
       setIsCapturingOrder(false)
     }
   }
 
-  const handleCancelSubscription = async (id: string, description: string) => {
+  const handleCancelSubscription = async (id: string) => {
     await wisepayerApi.cancelSubscription(id)
-    setLeaks(prev => prev.filter(l => l.event_id !== id))
-    // Recalculate summary
-    setTotalWaste(prev => Math.max(0, prev - (leaks.find(l => l.event_id === id)?.annual_cost || 0)))
+    await loadDashboardData()
   }
 
-  const toggleHoldPause = (id: string) => {
-    setPausedHolds(prev => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
+  const toggleHoldPause = async (hold: SmartWaitHold) => {
+    try {
+      if (hold.status === 'paused') {
+        await wisepayerApi.resumeSmartWaitHold(hold.id)
+      } else {
+        await wisepayerApi.pauseSmartWaitHold(hold.id)
+      }
+      const holdsRes = await wisepayerApi.getSmartWaitHolds()
+      setHolds(holdsRes.data.holds)
+    } catch (e) {
+      console.error('Failed to toggle hold pause', e)
+    }
   }
 
   const handleCancelHold = async (id: string) => {
@@ -261,15 +325,14 @@ export const Dashboard: React.FC = () => {
   return (
     <div className="min-h-screen bg-slate-950 text-white flex flex-col">
       {/* ── Sandbox Provenance Banner ── */}
-      <div className="bg-blue-950/90 border-b border-blue-800/60 px-6 py-2 text-xs text-blue-200 flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-          <span>
-            <strong>PayPal Sandbox Mode</strong> · Active Test Account (<code>demo-user-001</code>) · Simulated Financial Events · No Real Funds
+      <div className="bg-blue-950/90 border-b border-blue-800/60 px-4 sm:px-6 py-2 text-xs text-blue-200 flex items-center justify-between">
+        <div className="flex items-center gap-2 overflow-hidden">
+          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+          <span className="truncate">
+            <strong>PayPal Sandbox Mode</strong> · Active Account (<code>{DEMO_USER.id}</code>) · Single Shared Financial Model · No Real Funds
           </span>
         </div>
-        <div className="flex items-center gap-3">
-          <span className="text-slate-400 text-xs hidden sm:inline">PayPal AI Hackathon 2026</span>
+        <div className="flex items-center gap-2 shrink-0">
           <span className="px-2 py-0.5 rounded bg-blue-900/60 text-blue-300 font-mono text-[10px] border border-blue-700/50">
             SANDBOX REST v2
           </span>
@@ -277,35 +340,37 @@ export const Dashboard: React.FC = () => {
       </div>
 
       {/* ── Top Nav ── */}
-      <header className="border-b border-slate-800 px-6 py-4 flex items-center justify-between">
+      <header className="border-b border-slate-800 px-4 sm:px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center shadow-lg shadow-blue-500/20">
             <span className="text-base">🛡️</span>
           </div>
           <div>
             <h1 className="font-bold text-lg leading-none tracking-tight">PayPal WisePayer</h1>
-            <p className="text-xs text-slate-400 mt-0.5">Autonomous Cashflow Guardian & Commerce Engine</p>
+            <p className="text-xs text-slate-400 mt-0.5">Autonomous Cashflow Guardian & Agentic Commerce</p>
           </div>
         </div>
-        <div className="flex items-center gap-4 text-sm text-slate-300">
+        <div className="flex items-center gap-3 text-sm text-slate-300">
           <div className="hidden sm:flex items-center gap-3 bg-slate-900 border border-slate-800 rounded-xl px-3 py-1.5 text-xs">
-            <span>Balance: <strong className="text-emerald-400 font-semibold">${DEMO_USER.balance.toLocaleString()}</strong></span>
+            <span>Balance: <strong className="text-emerald-400 font-semibold">${userBalance.toLocaleString(undefined, { minimumFractionDigits: 2 })}</strong></span>
             <span className="text-slate-600">|</span>
             <span>Min Buffer: <strong className="text-amber-400 font-semibold">${minBalanceBuffer}</strong></span>
+            <span className="text-slate-600">|</span>
+            <span>Daily Spent: <strong className="text-slate-200 font-semibold">${spentToday.toFixed(2)}</strong>/${dailySpendingLimit}</span>
           </div>
           <button
             onClick={() => setIsSettingsOpen(true)}
             className="p-2 rounded-xl bg-slate-900 border border-slate-800 hover:border-slate-700 text-slate-400 hover:text-white transition-all"
-            title="Configure Agent Guardrails"
+            title="Configure Agent Spending Guardrails"
           >
             <Settings className="w-4 h-4" />
           </button>
         </div>
       </header>
 
-      {/* ── Tab Bar ── */}
-      <div className="border-b border-slate-800 px-6">
-        <div className="flex gap-1">
+      {/* ── Tab Bar (Mobile Horizontal Scrollable) ── */}
+      <div className="border-b border-slate-800 px-4 sm:px-6 overflow-x-auto whitespace-nowrap">
+        <div className="flex gap-2 min-w-max">
           {TABS.map(tab => (
             <button
               key={tab.id}
@@ -319,12 +384,12 @@ export const Dashboard: React.FC = () => {
               <tab.icon className="w-4 h-4" />
               {tab.label}
               {tab.id === 'subscriptions' && leaks.length > 0 && (
-                <span className="px-1.5 py-0.5 rounded-full bg-red-600 text-white text-xs leading-none font-bold">
+                <span className="px-1.5 py-0.5 rounded-full bg-red-600 text-white text-[10px] leading-none font-bold">
                   {leaks.length}
                 </span>
               )}
               {tab.id === 'holds' && holds.length > 0 && (
-                <span className="px-1.5 py-0.5 rounded-full bg-blue-600 text-white text-xs leading-none font-bold">
+                <span className="px-1.5 py-0.5 rounded-full bg-blue-600 text-white text-[10px] leading-none font-bold">
                   {holds.length}
                 </span>
               )}
@@ -334,7 +399,7 @@ export const Dashboard: React.FC = () => {
       </div>
 
       {/* ── Main Content ── */}
-      <main className="max-w-6xl mx-auto px-6 py-8 flex-1 w-full">
+      <main className="max-w-6xl mx-auto px-4 sm:px-6 py-8 flex-1 w-full">
         {/* ── Guardian Checkout Tab ── */}
         {activeTab === 'checkout' && (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
@@ -344,22 +409,22 @@ export const Dashboard: React.FC = () => {
 
               <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 flex flex-col gap-5 shadow-xl">
                 <div className="flex items-center justify-between">
-                  <h2 className="text-white font-semibold flex items-center gap-2">
+                  <h2 className="text-white font-semibold flex items-center gap-2 text-sm sm:text-base">
                     <span>🛒</span> Evaluate Purchase Request
                   </h2>
-                  <span className="text-[11px] text-slate-400">Cashflow-guaranteed check</span>
+                  <span className="text-[11px] text-slate-400">Bills & Liquidity Guard</span>
                 </div>
 
                 {/* Preset Scenarios for Instant Demo */}
                 <div>
                   <label className="text-xs text-slate-400 mb-1.5 block">Quick Test Scenarios (1-Click Evaluation):</label>
-                  <div className="grid grid-cols-3 gap-2">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                     {PRESET_SCENARIOS.map((scen, idx) => (
                       <button
                         key={idx}
                         type="button"
                         onClick={() => runPresetScenario(scen)}
-                        className="p-2 rounded-xl border border-slate-800 bg-slate-800/60 hover:bg-slate-800 hover:border-blue-500/50 text-left transition-all group"
+                        className="p-2.5 rounded-xl border border-slate-800 bg-slate-800/60 hover:bg-slate-800 hover:border-blue-500/50 text-left transition-all group"
                       >
                         <p className="text-xs font-semibold text-slate-200 group-hover:text-blue-300 truncate">{scen.name}</p>
                         <p className="text-[10px] text-slate-400 truncate mt-0.5">{scen.desc}</p>
@@ -421,7 +486,7 @@ export const Dashboard: React.FC = () => {
                   </div>
                   <button
                     onClick={() => setEnableA2A(!enableA2A)}
-                    className={`w-11 h-6 rounded-full transition-colors ${enableA2A ? 'bg-purple-600' : 'bg-slate-700'} relative`}
+                    className={`w-11 h-6 rounded-full transition-colors ${enableA2A ? 'bg-purple-600' : 'bg-slate-700'} relative shrink-0`}
                   >
                     <div className={`w-4 h-4 rounded-full bg-white absolute top-1 transition-all ${enableA2A ? 'left-6' : 'left-1'}`} />
                   </button>
@@ -451,10 +516,11 @@ export const Dashboard: React.FC = () => {
                   decision={decision}
                   productName={productName}
                   requestedAmount={amount}
-                  currentBalance={DEMO_USER.balance}
+                  currentBalance={userBalance}
                   onConfirmPayment={handleInitiatePayment}
                   onReject={() => setDecision(null)}
                   isLoading={isEvaluating}
+                  isStale={isDecisionStale}
                 />
               ) : (
                 <div className="rounded-2xl border border-dashed border-slate-800 bg-slate-900/40 flex flex-col items-center justify-center p-12 gap-5 text-center h-full min-h-80 shadow-inner">
@@ -464,7 +530,7 @@ export const Dashboard: React.FC = () => {
                   <div className="max-w-sm">
                     <h3 className="text-white font-semibold text-base mb-1">Guarded Commerce Ready</h3>
                     <p className="text-slate-400 text-xs leading-relaxed">
-                      Select one of the <strong className="text-blue-400">1-click test scenarios</strong> or enter a product to see how WisePayer protects upcoming bills, negotiates with merchants, or structures PayPal Pay in 4.
+                      Select one of the <strong className="text-blue-400">1-click test scenarios</strong> or enter a purchase to evaluate upcoming bills ($950 reserved for Rent & Insurance) and explore safe payment options.
                     </p>
                   </div>
                 </div>
@@ -480,12 +546,15 @@ export const Dashboard: React.FC = () => {
               <div>
                 <h3 className="text-white font-semibold text-sm">30-Day Rolling Cashflow Ledger</h3>
                 <p className="text-xs text-slate-400">
-                  Data provenance: Synced with PayPal Sandbox & Essential Bill Schedule (Rent $800, Insurance $150, Salary $1,800).
+                  Authoritative Schedule: Rent $800 (Day 4), Car Insurance $150 (Day 2), Salary $1,800 (Day 10). Buffer: ${minBalanceBuffer}.
                 </p>
               </div>
               <div className="flex items-center gap-2 text-xs">
-                <span className="px-2.5 py-1 rounded-md bg-emerald-950 border border-emerald-800 text-emerald-300">
+                <span className="px-2.5 py-1 rounded-md bg-emerald-950 border border-emerald-800 text-emerald-300 font-semibold">
                   Safe Discretionary Today: $270.00
+                </span>
+                <span className="px-2.5 py-1 rounded-md bg-red-950 border border-red-800 text-red-300 font-semibold">
+                  Reserved for Bills: $950.00
                 </span>
               </div>
             </div>
@@ -497,7 +566,7 @@ export const Dashboard: React.FC = () => {
           </motion.div>
         )}
 
-        {/* ── Subscriptions Tab ── */}
+        {/* ── Recurring Leaks Tab ── */}
         {activeTab === 'subscriptions' && (
           <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}>
             <SubscriptionLeakDetector
@@ -546,7 +615,7 @@ export const Dashboard: React.FC = () => {
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {holds.map((hold) => {
-                  const isPaused = pausedHolds.has(hold.id)
+                  const isPaused = hold.status === 'paused'
                   return (
                     <div
                       key={hold.id}
@@ -575,7 +644,7 @@ export const Dashboard: React.FC = () => {
                         <span className="text-slate-500 font-mono text-[10px]">{hold.id}</span>
                         <div className="flex items-center gap-2">
                           <button
-                            onClick={() => toggleHoldPause(hold.id)}
+                            onClick={() => toggleHoldPause(hold)}
                             className="flex items-center gap-1 px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs transition-colors"
                           >
                             {isPaused ? <Play className="w-3 h-3" /> : <Pause className="w-3 h-3" />}
@@ -612,7 +681,7 @@ export const Dashboard: React.FC = () => {
               <div className="flex items-center justify-between border-b border-slate-800 pb-4">
                 <div className="flex items-center gap-2">
                   <Sliders className="w-5 h-5 text-blue-400" />
-                  <h3 className="text-white font-semibold text-base">Agent Guardrails & Spending Policy</h3>
+                  <h3 className="text-white font-semibold text-base">Server-Enforced Guardrails</h3>
                 </div>
                 <button
                   onClick={() => setIsSettingsOpen(false)}
@@ -646,7 +715,7 @@ export const Dashboard: React.FC = () => {
                     onChange={e => setDailySpendingLimit(Number(e.target.value))}
                     className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-white text-sm"
                   />
-                  <p className="text-[11px] text-slate-500 mt-1">Caps total discretionary outflow permitted in a 24-hour cycle.</p>
+                  <p className="text-[11px] text-slate-500 mt-1">Server enforces this ceiling across all transactions in a 24-hour cycle.</p>
                 </div>
 
                 <div>
@@ -663,15 +732,23 @@ export const Dashboard: React.FC = () => {
                 </div>
               </div>
 
-              <button
-                onClick={() => {
-                  setIsSettingsOpen(false)
-                  loadDashboardData()
-                }}
-                className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-sm transition-colors mt-2"
-              >
-                Apply Guardrail Policy
-              </button>
+              <div className="flex gap-2 pt-2 border-t border-slate-800">
+                <button
+                  onClick={handleResetDemo}
+                  className="px-4 py-2.5 rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 text-xs text-slate-300 font-semibold flex items-center gap-1.5 transition-colors"
+                  title="Reset Demo Seed State ($1,420 balance, $200 buffer)"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>Reset Demo</span>
+                </button>
+                <button
+                  onClick={handleSavePolicy}
+                  disabled={isSavingSettings}
+                  className="flex-1 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs transition-colors"
+                >
+                  {isSavingSettings ? 'Saving Policy…' : 'Save & Enforce Policy'}
+                </button>
+              </div>
             </motion.div>
           </div>
         )}
@@ -694,8 +771,8 @@ export const Dashboard: React.FC = () => {
                     P
                   </div>
                   <div>
-                    <h3 className="text-white font-semibold text-base leading-none">PayPal Sandbox Checkout</h3>
-                    <p className="text-xs text-slate-400 mt-1">Verified REST Orders v2 Flow</p>
+                    <h3 className="text-white font-semibold text-base leading-none">PayPal Sandbox Checkout Journey</h3>
+                    <p className="text-xs text-slate-400 mt-1">Verified REST Orders v2 Flow with Server Reconciliation</p>
                   </div>
                 </div>
                 <button
@@ -706,6 +783,14 @@ export const Dashboard: React.FC = () => {
                 </button>
               </div>
 
+              {/* Progress Tracker */}
+              <div className="grid grid-cols-4 gap-1 text-[10px] text-center pb-1 border-b border-slate-800">
+                <div className="text-blue-400 font-bold">1. Evaluated ✓</div>
+                <div className={`${activeOrder ? 'text-blue-400 font-bold' : 'text-slate-500'}`}>2. Order Created</div>
+                <div className={`${activeOrder?.approvalUrl ? 'text-blue-400 font-bold' : 'text-slate-500'}`}>3. Approved</div>
+                <div className={`${capturedReceipt ? 'text-emerald-400 font-bold' : 'text-slate-500'}`}>4. Captured</div>
+              </div>
+
               {/* State 1: Receipt (Payment Captured) */}
               {capturedReceipt ? (
                 <div className="flex flex-col gap-4 text-center py-2">
@@ -713,7 +798,7 @@ export const Dashboard: React.FC = () => {
                     <CheckCircle2 className="w-8 h-8" />
                   </div>
                   <div>
-                    <h4 className="text-lg font-bold text-white">Payment Successfully Captured</h4>
+                    <h4 className="text-lg font-bold text-white">Payment Captured & Ledger Reconciled</h4>
                     <p className="text-xs text-slate-400 mt-0.5">Verified on PayPal Sandbox REST v2 API</p>
                   </div>
 
@@ -727,7 +812,7 @@ export const Dashboard: React.FC = () => {
                       <span className="font-mono text-emerald-300 font-bold">{capturedReceipt.capture_id}</span>
                     </div>
                     <div className="flex justify-between items-center">
-                      <span className="text-slate-400">Status</span>
+                      <span className="text-slate-400">PayPal Status</span>
                       <span className="px-2 py-0.5 bg-emerald-900/60 text-emerald-200 border border-emerald-700/50 rounded font-semibold text-[11px]">
                         {capturedReceipt.status}
                       </span>
@@ -739,20 +824,35 @@ export const Dashboard: React.FC = () => {
                       </span>
                     </div>
                     <div className="flex justify-between items-center">
-                      <span className="text-slate-400">Cashflow Impact</span>
-                      <span className="text-emerald-400 font-semibold">Protected within buffer (${minBalanceBuffer})</span>
+                      <span className="text-slate-400">Updated Account Balance</span>
+                      <span className="text-emerald-400 font-bold text-sm">
+                        ${userBalance.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                      </span>
                     </div>
                   </div>
 
-                  <button
-                    onClick={() => {
-                      setCheckoutModalOpen(false)
-                      setDecision(null)
-                    }}
-                    className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-sm transition-colors mt-2"
-                  >
-                    Done & Return to Dashboard
-                  </button>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => {
+                        setCheckoutModalOpen(false)
+                        setDecision(null)
+                        setActiveTab('cashflow')
+                      }}
+                      className="flex-1 py-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-xs transition-colors flex items-center justify-center gap-1.5"
+                    >
+                      <span>View in Cashflow Ledger</span>
+                      <ArrowRight className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      onClick={() => {
+                        setCheckoutModalOpen(false)
+                        setDecision(null)
+                      }}
+                      className="flex-1 py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs transition-colors"
+                    >
+                      Done & Return
+                    </button>
+                  </div>
                 </div>
               ) : (
                 /* State 2: Order Active, Waiting Capture */
@@ -802,7 +902,7 @@ export const Dashboard: React.FC = () => {
                           className="w-full py-3.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-800 disabled:text-slate-600 text-white font-bold text-sm transition-all shadow-lg shadow-emerald-700/30 flex items-center justify-center gap-2"
                         >
                           {isCapturingOrder ? (
-                            'Capturing via PayPal API…'
+                            'Capturing via PayPal REST API…'
                           ) : (
                             <>
                               <CheckCircle2 className="w-4 h-4" />

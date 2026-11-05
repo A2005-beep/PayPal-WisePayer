@@ -68,6 +68,8 @@ class AgentDecision:
     paypal_order_id: Optional[str] = None
     paypal_approval_url: Optional[str] = None
     rollback_deadline: Optional[datetime] = None
+    counterfactuals: list[dict] = field(default_factory=list)
+    negotiation_details: Optional[dict[str, Any]] = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -134,21 +136,28 @@ class BuyerAgent:
 
         # ── Step 2: A2A negotiation (if merchant endpoint provided)
         negotiated_amount = None
-        if request.merchant_agent_url and action in ("not_recommended", "smart_wait"):
-            negotiated_amount = self._negotiate_with_merchant(request, safe_today)
-            if negotiated_amount and negotiated_amount <= safe_today:
-                status = "affordable_now"
-                action = "full_payment"
+        negotiation_details = None
+        if request.merchant_agent_url:
+            negotiation_details = self._negotiate_with_merchant_detailed(request, safe_today)
+            if negotiation_details.get("accepted"):
+                final_price = negotiation_details.get("final_price")
+                if final_price and final_price <= safe_today:
+                    negotiated_amount = final_price
+                    status = "affordable_now"
+                    action = "full_payment"
 
         final_amount = negotiated_amount or request.amount
 
         # ── Step 3: Build payment plan
         plan = self._build_payment_plan(action, final_amount, safe_today, earliest)
 
-        # ── Step 4: Generate "Explain My No" card
+        # ── Step 4: Generate counterfactual analysis
+        counterfactuals = self._build_counterfactuals(request.amount, safe_today, earliest)
+
+        # ── Step 5: Generate "Explain My No" card
         explain = self._generate_explanation(request, status, action, safe_today, earliest)
 
-        # ── Step 5: Execute (if autonomy permits)
+        # ── Step 6: Execute (if autonomy permits)
         order_id = None
         approval_url = None
         rollback_deadline = None
@@ -168,12 +177,29 @@ class BuyerAgent:
             paypal_order_id=order_id,
             paypal_approval_url=approval_url,
             rollback_deadline=rollback_deadline,
+            counterfactuals=counterfactuals,
+            negotiation_details=negotiation_details,
         )
 
     # ─────────────────────────────────────────── payment strategy ────────────
     def _pay_in_4_safe(self, amount: float) -> bool:
-        """Check if Pay in 4 installments keep cashflow safe across 6 weeks."""
+        """
+        Check if Pay in 4 installments keep cashflow safe across 6 weeks.
+        Verifies:
+        1. First installment does not exceed safe discretionary liquidity today.
+        2. Lowest projected daily balance before next income NEVER breaches minimum buffer.
+        3. All bi-weekly installment dates have sufficient discretionary margin.
+        """
         installment = amount / 4
+        if installment > self.model.safe_discretionary_today():
+            return False
+
+        # Verify that paying installment today does NOT cause balance to breach minimum_balance on ANY day ahead
+        # before the next major inflow
+        for snap in self.model.snapshots[:14]:
+            if (snap.projected_balance - installment) < self.model.minimum_balance:
+                return False
+
         dates_to_check = [
             date.today(),
             date.today() + timedelta(weeks=2),
@@ -185,6 +211,55 @@ class BuyerAgent:
             if snap and snap.available_discretionary < installment:
                 return False
         return True
+
+    def _build_counterfactuals(
+        self, amount: float, safe_today: float, earliest: Optional[date]
+    ) -> list[dict]:
+        """
+        Side-by-side purchase scenario simulation:
+        Option 1: Buy in Full Today
+        Option 2: PayPal Pay in 4
+        Option 3: Smart Wait (Post-Income Release)
+        """
+        # Option 1: Buy in Full Today
+        lowest_bal_full = min(snap.projected_balance - amount for snap in self.model.snapshots[:14])
+        is_safe_full = safe_today >= amount and lowest_bal_full >= self.model.minimum_balance
+
+        # Option 2: Pay in 4
+        installment = round(amount / 4, 2)
+        lowest_bal_p4 = min(snap.projected_balance - installment for snap in self.model.snapshots[:14])
+        is_safe_p4 = self._pay_in_4_safe(amount)
+
+        # Option 3: Smart Wait
+        wait_date_str = earliest.strftime('%b %d') if earliest else 'After Next Payday'
+        lowest_bal_wait = min(snap.projected_balance for snap in self.model.snapshots)
+
+        return [
+            {
+                "option": "Buy in Full Today",
+                "upfront": amount,
+                "lowest_projected_balance": round(lowest_bal_full, 2),
+                "is_safe": is_safe_full,
+                "status": "Safe & Approved" if is_safe_full else f"Breaches Buffer (${lowest_bal_full:.2f} < ${self.model.minimum_balance:.0f})",
+                "risk_assessment": "Safe within discretionary liquidity" if is_safe_full else "Compromises upcoming essential bills",
+            },
+            {
+                "option": "PayPal Pay in 4",
+                "upfront": installment,
+                "lowest_projected_balance": round(lowest_bal_p4, 2),
+                "is_safe": is_safe_p4,
+                "status": "Safe with Plan" if is_safe_p4 else f"Installment Breaches Buffer (${lowest_bal_p4:.2f})",
+                "risk_assessment": "4 biweekly installments protect liquidity" if is_safe_p4 else "First payment creates cashflow shortfall before salary",
+            },
+            {
+                "option": f"Smart Wait ({wait_date_str})",
+                "upfront": 0.0,
+                "lowest_projected_balance": round(lowest_bal_wait, 2),
+                "is_safe": True,
+                "status": "Guaranteed Safe",
+                "risk_assessment": "Defers execution until verified salary arrival",
+            },
+        ]
 
     def _build_payment_plan(
         self,
@@ -281,27 +356,16 @@ Output only the explanation text, no JSON or markdown."""
         return response.text.strip() if response and response.text else ""
 
     # ──────────────────────────────────────── A2A merchant negotiation ───────
-    def _negotiate_with_merchant(
+    def _negotiate_with_merchant_detailed(
         self, request: PurchaseRequest, safe_budget: float
-    ) -> Optional[float]:
+    ) -> dict[str, Any]:
         """
-        A2A negotiation with merchant agent.
-        Uses MerchantAgent protocol to request a budget-aligned discount.
+        Structured A2A negotiation protocol:
+        Buyer Agent submits budget constraint and requested discount.
+        Merchant Agent responds with acceptance, counter-offer, or installment terms.
         """
-        if not request.merchant_agent_url:
-            return None
-
-        shortfall = request.amount - safe_budget
-        if shortfall <= 0:
-            return request.amount
-
-        # Buyer agent proposes budget match discount
-        discount_pct = (shortfall / request.amount) * 100
-        logger.info(
-            "[A2A] Buyer Agent → Merchant: Offering $%.2f (%.1f%% discount requested)",
-            safe_budget,
-            discount_pct,
-        )
+        shortfall = max(0.0, request.amount - safe_budget)
+        discount_pct = (shortfall / request.amount) * 100 if shortfall > 0 else 5.0
 
         try:
             try:
@@ -309,9 +373,9 @@ Output only the explanation text, no JSON or markdown."""
             except (ImportError, ValueError):
                 from agent.merchant_agent import MerchantAgent, NegotiationRequest
 
-            merchant = MerchantAgent(merchant_name="Verified Partner Merchant", max_discount_pct=10.0)
-            negotiation = merchant.negotiate(NegotiationRequest(
-                buyer_agent_id="buyer-agent-001",
+            merchant = MerchantAgent(merchant_name="ElectroWorld Partner Store", max_discount_pct=10.0)
+            res = merchant.negotiate(NegotiationRequest(
+                buyer_agent_id="wisepayer-buyer-agent",
                 product_name=request.product_name,
                 list_price=request.amount,
                 currency=request.currency,
@@ -320,15 +384,40 @@ Output only the explanation text, no JSON or markdown."""
                 allow_installments=True,
             ))
 
-            if negotiation.accepted and negotiation.final_price <= safe_budget:
-                logger.info("[A2A] Merchant Agent accepted! Final negotiated price: $%.2f", negotiation.final_price)
-                return negotiation.final_price
-            else:
-                logger.info("[A2A] Merchant Agent declined or countered with installments: %s", negotiation.merchant_message)
-                return None
+            is_accepted = res.accepted and (res.final_price <= safe_budget or safe_budget >= request.amount)
+            return {
+                "attempted": True,
+                "accepted": is_accepted,
+                "counter_type": res.counter_type,
+                "merchant_name": "ElectroWorld Partner Store",
+                "buyer_budget_constraint": round(safe_budget, 2),
+                "list_price": request.amount,
+                "discount_requested_pct": round(discount_pct, 1),
+                "final_price": res.final_price,
+                "installment_plan": res.installment_plan,
+                "merchant_message": res.merchant_message,
+                "ai_agent_rationale": (
+                    f"Buyer Agent set safe ceiling at ${safe_budget:.2f}. "
+                    f"Merchant Agent responded with {res.counter_type}: {res.merchant_message}"
+                ),
+            }
         except Exception as exc:
             logger.warning("[A2A] Negotiation error: %s", exc)
-            return None
+            return {
+                "attempted": True,
+                "accepted": False,
+                "counter_type": "error",
+                "merchant_message": str(exc),
+                "ai_agent_rationale": f"Negotiation protocol offline: {exc}",
+            }
+
+    def _negotiate_with_merchant(
+        self, request: PurchaseRequest, safe_budget: float
+    ) -> Optional[float]:
+        details = self._negotiate_with_merchant_detailed(request, safe_budget)
+        if details.get("accepted"):
+            return details.get("final_price")
+        return None
 
     # ──────────────────────────────────────────────── auto-execution ─────────
     def _should_auto_execute(self, action: str, amount: float) -> bool:
